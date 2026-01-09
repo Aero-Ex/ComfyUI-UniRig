@@ -169,19 +169,27 @@ def load_model_into_memory(model_type: str, task_config_path: str, cache_to_gpu:
         os.chdir(original_cwd)
 
 
-def apply_config_overrides(config, overrides: dict):
+def apply_config_overrides(config, overrides: dict, system=None):
     """
     Apply config overrides to a Box/dict config object.
 
     Args:
         config: Box or dict config object
         overrides: Dictionary of override values
+        system: Optional system object to apply model-level overrides
 
     Returns:
         Modified config object
     """
     if not overrides:
         return config
+
+    # Apply model-level overrides (voxel_mask_power affects the model's post-processing)
+    if system is not None and 'voxel_mask_power' in overrides:
+        if hasattr(system, 'model') and system.model is not None:
+            if hasattr(system.model, 'voxel_mask'):
+                system.model.voxel_mask = overrides['voxel_mask_power']
+                print(f"[UniRigCache] Set model.voxel_mask = {overrides['voxel_mask_power']}")
 
     # Apply overrides to transform config (sampler and vertex group)
     if hasattr(config, 'predict_transform_config') or 'predict_transform_config' in config:
@@ -201,9 +209,9 @@ def apply_config_overrides(config, overrides: dict):
                 vs = vg_kwargs['voxel_skin']
                 if 'voxel_grid_size' in overrides:
                     vs['grid'] = overrides['voxel_grid_size']
-                # Map voxel_mask_power to alpha (voxel_mask_power is the UI name)
-                if 'voxel_mask_power' in overrides:
-                    vs['alpha'] = overrides['voxel_mask_power']
+                # voxel_alpha controls transform voxelization sharpness (separate from model's voxel_mask_power)
+                if 'voxel_alpha' in overrides:
+                    vs['alpha'] = overrides['voxel_alpha']
                 elif 'alpha' in overrides:
                     vs['alpha'] = overrides['alpha']
                 if 'grid_query' in overrides:
@@ -271,10 +279,10 @@ def run_inference(cache_key: str, request_data: dict) -> dict:
         data_config = load_yaml_config(os.path.join(str(UNIRIG_PATH), 'configs/data', task.components.data))
         transform_config = load_yaml_config(os.path.join(str(UNIRIG_PATH), 'configs/transform', task.components.transform))
 
-        # Apply config overrides to transform config
+        # Apply config overrides to transform config and model
         if config_overrides:
             print(f"[UniRigCache] Applying config overrides: {config_overrides}")
-            transform_config = apply_config_overrides(transform_config, config_overrides)
+            transform_config = apply_config_overrides(transform_config, config_overrides, system=system)
 
         # Get data name
         data_name_actual = task.components.get('data_name', 'raw_data.npz')

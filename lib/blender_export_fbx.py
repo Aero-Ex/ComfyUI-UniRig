@@ -103,6 +103,52 @@ try:
     max_z_joint_idx = joints[:, 2].argmax()
     max_z_joint = joints[max_z_joint_idx]
     print(f"[Blender FBX Export] DEBUG - Skeleton joint with max Z: position={max_z_joint}, Z={max_z_joint[2]:.6f}, Y={max_z_joint[1]:.6f}")
+    
+    # Final NaN check and fallback for all data
+    if np.isnan(joints).any():
+        print("[Blender FBX Export] WARNING: NaN found in joints data - replacing with 0")
+        joints = np.nan_to_num(joints)
+        
+    if vertices is not None and np.isnan(vertices).any():
+        print("[Blender FBX Export] WARNING: NaN found in vertices data - replacing with 0")
+        vertices = np.nan_to_num(vertices)
+        
+    if skin is not None and np.isnan(skin).any():
+        print("[Blender FBX Export] WARNING: NaN found in skin weights data - replacing with 0")
+        skin = np.nan_to_num(skin)
+        
+    if tails is not None and np.isnan(tails).any():
+        print("[Blender FBX Export] WARNING: NaN found in tails data - replacing with 0")
+        tails = np.nan_to_num(tails)
+        
+    # === SKELETON-TO-MESH SCALE TRANSFORMATION ===
+    # Skeleton joints are in normalized [-1, 1] space from the model
+    # Mesh vertices (origin_vertices) are in original mesh scale
+    # We need to transform skeleton to match mesh scale
+    do_not_normalize = data.get('do_not_normalize', False)
+    
+    if vertices is not None and not do_not_normalize:
+        # Calculate mesh bounds
+        mesh_min = vertices.min(axis=0)
+        mesh_max = vertices.max(axis=0)
+        mesh_center = (mesh_min + mesh_max) / 2
+        mesh_scale = np.max(mesh_max - mesh_min) / 2
+        
+        print(f"[Blender FBX Export] SCALE FIX - Mesh center: {mesh_center}, scale: {mesh_scale}")
+        print(f"[Blender FBX Export] SCALE FIX - Before transform - Joints bounds: {joints.min(axis=0)} to {joints.max(axis=0)}")
+        
+        # Transform skeleton from normalized [-1, 1] to mesh space
+        # Inverse of: normalized = (original - center) / scale
+        # Original = normalized * scale + center
+        joints = joints * mesh_scale + mesh_center
+        if tails is not None:
+            tails = tails * mesh_scale + mesh_center
+            
+        print(f"[Blender FBX Export] SCALE FIX - After transform - Joints bounds: {joints.min(axis=0)} to {joints.max(axis=0)}")
+        print(f"[Blender FBX Export] SCALE FIX - Mesh bounds: {mesh_min} to {mesh_max}")
+    else:
+        print(f"[Blender FBX Export] SCALE FIX - Skipping (no vertices or do_not_normalize={do_not_normalize})")
+
 except Exception as e:
     print(f"[Blender FBX Export] Failed to load pickle: {e}")
     import traceback
@@ -272,7 +318,7 @@ if is_smpl_skeleton:
             tails[l_wrist_idx] = new_l_wrist + l_tpose_dir * wrist_tail_len
             tails[r_wrist_idx] = new_r_wrist + r_tpose_dir * wrist_tail_len
 
-        print("[Blender FBX Export] ✓ T-pose conversion complete")
+        print("[Blender FBX Export] [OK] T-pose conversion complete")
 
         # Debug: show new bounds
         if vertices is not None:
@@ -304,7 +350,7 @@ if vertices is not None:
                     if uv_idx < len(uv_coords):
                         uv_layer.data[loop_idx].uv = uv_coords[uv_idx]
 
-        print(f"[Blender FBX Export] ✓ UV coordinates applied")
+        print(f"[Blender FBX Export] [OK] UV coordinates applied")
     else:
         print(f"[Blender FBX Export] No UV coordinates available")
 
@@ -380,7 +426,7 @@ if vertices is not None:
             for poly in obj.data.polygons:
                 poly.material_index = 0
 
-            print(f"[Blender FBX Export] ✓ Textured material applied: {material_name_from_data}")
+            print(f"[Blender FBX Export] [OK] Textured material applied: {material_name_from_data}")
 
             # Clean up temp file
             try:
@@ -509,7 +555,7 @@ try:
                     # Default: use world up as reference
                     bone.align_roll(Vector((0, 1, 0)))
 
-        print("[Blender FBX Export] ✓ Bone rolls set for SMPL compatibility")
+        print("[Blender FBX Export] [OK] Bone rolls set for SMPL compatibility")
 
     # Add skinning weights if vertices and skin provided
     if vertices is not None and skin is not None:
@@ -539,7 +585,7 @@ try:
 
         do_not_normalize = data.get('do_not_normalize', False)
         if not do_not_normalize:
-            vertex_group_reweight = vertex_group_reweight / vertex_group_reweight[..., :group_per_vertex].sum(axis=1)[..., None]
+            vertex_group_reweight = vertex_group_reweight / (vertex_group_reweight[..., :group_per_vertex].sum(axis=1)[..., None] + 1e-8)
 
         for v, w in enumerate(skin):
             for ii in range(group_per_vertex):
@@ -551,7 +597,7 @@ try:
                     continue
                 ob.vertex_groups[n].add([v], vertex_group_reweight[v, ii], 'REPLACE')
 
-    print("[Blender FBX Export] ✓ Armature created successfully")
+    print("[Blender FBX Export] [OK] Armature created successfully")
 
 except Exception as e:
     print(f"[Blender FBX Export] Armature creation failed: {e}")
@@ -574,7 +620,7 @@ try:
     )
     print(f"[Blender FBX Export] Saved to: {output_fbx}")
     if texture_data_base64 and len(texture_data_base64) > 0:
-        print(f"[Blender FBX Export] ✓ Textures embedded in FBX")
+        print(f"[Blender FBX Export] [OK] Textures embedded in FBX")
     print("[Blender FBX Export] Done!")
 except Exception as e:
     print(f"[Blender FBX Export] Export failed: {e}")

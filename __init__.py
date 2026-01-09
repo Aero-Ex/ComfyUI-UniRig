@@ -211,7 +211,7 @@ if not _RUNNING_TESTS:
                 ]
 
                 # Run Blender
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=BLENDER_TIMEOUT)
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=BLENDER_TIMEOUT)
 
                 # Print Blender output for debugging
                 if result.stdout:
@@ -229,7 +229,7 @@ if not _RUNNING_TESTS:
                 if not os.path.exists(output_fbx_path):
                     return web.json_response({'error': 'Export completed but output file not found'}, status=500)
 
-                print(f"[UniRig Export API] ✓ Successfully exported to: {output_fbx_path}")
+                print(f"[UniRig Export API] [OK] Successfully exported to: {output_fbx_path}")
 
                 return web.json_response({
                     'success': True,

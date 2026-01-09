@@ -83,6 +83,8 @@ def load_fbx_with_blender(file_path: str) -> Tuple[Optional[trimesh.Trimesh], st
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=BLENDER_TIMEOUT
             )
 

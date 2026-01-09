@@ -59,7 +59,7 @@ def apply_config_overrides(config, overrides: dict):
                 ptc['sampler_config']['vertex_samples'] = overrides['vertex_samples']
 
         # Override vertex group config (voxel_skin)
-        if 'vertex_group_config' in ptc and 'kwargs' in ptc['vertex_group_config']:
+        if 'vertex_group_config' in ptc and ptc['vertex_group_config'] is not None and 'kwargs' in ptc['vertex_group_config']:
             vg_kwargs = ptc['vertex_group_config']['kwargs']
             if 'voxel_skin' in vg_kwargs:
                 vs = vg_kwargs['voxel_skin']
@@ -76,6 +76,32 @@ def apply_config_overrides(config, overrides: dict):
                     vs['vertex_query'] = overrides['vertex_query']
                 if 'grid_weight' in overrides:
                     vs['grid_weight'] = overrides['grid_weight']
+
+    # Apply overrides to trainer config
+    if 'trainer' in overrides:
+        if not hasattr(config, 'trainer'):
+            config.trainer = {}
+        for k, v in overrides['trainer'].items():
+            config.trainer[k] = v
+            print(f"\033[92mOverriding trainer.{k} = {v}\033[0m")
+
+    # Apply overrides to model config
+    if 'model' in overrides:
+        if not hasattr(config, 'components'):
+            config.components = {}
+        if not hasattr(config.components, 'model_kwargs'):
+            config.components.model_kwargs = {}
+        for k, v in overrides['model'].items():
+            config.components.model_kwargs[k] = v
+            print(f"\033[92mOverriding model.{k} = {v}\033[0m")
+
+    # Apply overrides to system config (generate_kwargs)
+    if 'system' in overrides:
+        # If config is a Box/dict (like system_config loaded from yaml)
+        if 'generate_kwargs' in config:
+            for k, v in overrides['system'].items():
+                config['generate_kwargs'][k] = v
+                print(f"\033[92mOverriding system.generate_kwargs.{k} = {v}\033[0m")
 
     return config
 
@@ -141,6 +167,7 @@ if __name__ == "__main__":
             config_overrides = json.loads(config_overrides_json)
             print(f"\033[92mApplying config overrides: {config_overrides}\033[0m")
             transform_config = apply_config_overrides(transform_config, config_overrides)
+            task = apply_config_overrides(task, config_overrides)
         except json.JSONDecodeError as e:
             print(f"\033[91mWarning: Failed to parse config overrides: {e}\033[0m")
 
@@ -193,6 +220,11 @@ if __name__ == "__main__":
             tokenizer = get_tokenizer(config=tokenizer_config)
         else:
             tokenizer = None
+        # Merge model overrides
+        model_kwargs = task.components.get('model_kwargs', {})
+        for k, v in model_kwargs.items():
+            model_config[k] = v
+            
         model = get_model(tokenizer=tokenizer, **model_config)
     else:
         model = None
@@ -215,7 +247,7 @@ if __name__ == "__main__":
     
     # add call backs
     callbacks = []
-
+    
     ## get checkpoint callback
     checkpoint_config = task.get('checkpoint', None)
     if checkpoint_config is not None:
@@ -248,6 +280,15 @@ if __name__ == "__main__":
     system_config = task.components.get('system', None)
     if system_config is not None:
         system_config = load('system', os.path.join('configs/system', system_config))
+        
+        # Apply overrides to system_config
+        if config_overrides_json:
+            try:
+                config_overrides = json.loads(config_overrides_json)
+                system_config = apply_config_overrides(system_config, config_overrides)
+            except:
+                pass
+                
         system = get_system(
             **system_config,
             model=model,
@@ -306,7 +347,10 @@ if __name__ == "__main__":
                 torch.nn.MultiheadAttention,
             },
         )
-        trainer_config['strategy'] = strategy
+        strategy_config = strategy
+    else:
+        strategy_config = trainer_config.get('strategy', None)
+
     trainer = L.Trainer(
         callbacks=callbacks,
         logger=logger,

@@ -11,6 +11,7 @@ from trimesh import Trimesh
 import time
 import shutil
 import folder_paths
+import json
 
 # Support both relative imports (ComfyUI) and absolute imports (testing)
 try:
@@ -255,6 +256,13 @@ class UniRigExtractSkeletonNew:
                     "step": 10000,
                     "tooltip": "Target face count for mesh decimation. Higher = preserve more detail, slower. Default: 50000"
                 }),
+                "num_beams": ("INT", {
+                    "default": 15,
+                    "min": 1,
+                    "max": 15,
+                    "step": 1,
+                    "tooltip": "Number of beams for beam search. Higher = better quality, much more VRAM. Default: 15"
+                }),
             }
         }
 
@@ -263,7 +271,7 @@ class UniRigExtractSkeletonNew:
     FUNCTION = "extract"
     CATEGORY = "UniRig"
 
-    def extract(self, trimesh, skeleton_model, seed, skeleton_template="auto", target_face_count=None):
+    def extract(self, trimesh, skeleton_model, seed, skeleton_template="auto", target_face_count=TARGET_FACE_COUNT, num_beams=15):
         """Extract skeleton using UniRig with cached model only."""
         total_start = time.time()
         print(f"[UniRigExtractSkeletonNew] Starting skeleton extraction (cached model only)...")
@@ -399,6 +407,8 @@ class UniRigExtractSkeletonNew:
                     blender_cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=BLENDER_TIMEOUT
                 )
                 if result.stdout:
@@ -470,7 +480,7 @@ class UniRigExtractSkeletonNew:
                         )
 
                     inference_time = time.time() - step_start
-                    print(f"[UniRigExtractSkeletonNew] ✓ Cached inference completed in {inference_time:.2f}s")
+                    print(f"[UniRigExtractSkeletonNew] [OK] Cached inference completed in {inference_time:.2f}s")
 
                 except Exception as e:
                     raise RuntimeError(
@@ -481,6 +491,36 @@ class UniRigExtractSkeletonNew:
             else:
                 # FALLBACK TO SUBPROCESS (VRAM SAVING MODE)
                 print(f"[UniRigExtractSkeletonNew] Step 2: Running skeleton inference with subprocess (VRAM saving mode)...")
+                
+                # IMPORTANT: Clear CUDA cache to free VRAM for subprocess
+                # This is needed because other ComfyUI models may still be loaded
+                import torch
+                import gc
+                
+                print(f"[UniRigExtractSkeletonNew] Clearing VRAM for subprocess...")
+                
+                # 1. Use ComfyUI's model management to unload models from GPU
+                try:
+                    import model_management
+                    print(f"[UniRigExtractSkeletonNew] Unloading all ComfyUI models from GPU...")
+                    model_management.unload_all_models()
+                    model_management.soft_empty_cache()
+                except ImportError:
+                    try:
+                        from comfy import model_management
+                        print(f"[UniRigExtractSkeletonNew] Unloading all ComfyUI models from GPU (via comfy)...")
+                        model_management.unload_all_models()
+                        model_management.soft_empty_cache()
+                    except ImportError:
+                        print(f"[UniRigExtractSkeletonNew] Warning: Could not import model_management, falling back to basic torch clearing")
+                
+                # 2. Basic torch clearing as fallback/supplement
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print(f"[UniRigExtractSkeletonNew] CUDA cache cleared")
                 
                 # Use lib/unirig/run.py directly
                 unirig_run_py = os.path.join(UNIRIG_PATH, "run.py")
@@ -511,11 +551,25 @@ class UniRigExtractSkeletonNew:
                 print(f"[UniRigExtractSkeletonNew] Running command: {' '.join(run_cmd)}")
                 
                 env = setup_subprocess_env()
+                
+                
+                # Apply num_beams override
+                overrides = {
+                    "system": {
+                        "num_beams": num_beams
+                    }
+                }
+                env["UNIRIG_CONFIG_OVERRIDES"] = json.dumps(overrides)
+                
+                
+
                 try:
                     result = subprocess.run(
                         run_cmd,
                         capture_output=True,
                         text=True,
+                        encoding='utf-8',
+                        errors='replace',
                         env=env,
                         cwd=UNIRIG_PATH,
                         timeout=INFERENCE_TIMEOUT
@@ -531,7 +585,7 @@ class UniRigExtractSkeletonNew:
                         )
                         
                     inference_time = time.time() - step_start
-                    print(f"[UniRigExtractSkeletonNew] ✓ Subprocess inference completed in {inference_time:.2f}s")
+                    print(f"[UniRigExtractSkeletonNew] [OK] Subprocess inference completed in {inference_time:.2f}s")
                 except subprocess.TimeoutExpired:
                     raise RuntimeError(f"UniRig inference timed out (>{INFERENCE_TIMEOUT}s)")
                 except Exception as e:
@@ -572,6 +626,8 @@ class UniRigExtractSkeletonNew:
                     parse_cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=PARSE_TIMEOUT
                 )
                 if result.stdout:
@@ -756,7 +812,7 @@ class UniRigExtractSkeletonNew:
                 if model_bone_names is not None and len(model_bone_names) == num_bones:
                     # Use model-generated names (correct VRoid/template names)
                     names_list = [str(n) for n in model_bone_names]
-                    print(f"[UniRigExtractSkeletonNew] ✓ Using {len(names_list)} model-generated bone names")
+                    print(f"[UniRigExtractSkeletonNew] [OK] Using {len(names_list)} model-generated bone names")
                 else:
                     if model_bone_names is not None:
                         print(f"[UniRigExtractSkeletonNew] Model names count mismatch: {len(model_bone_names)} names vs {num_bones} bones")

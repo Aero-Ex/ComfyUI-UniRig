@@ -14,7 +14,8 @@ from copy import deepcopy
 # Check flash_attn availability
 try:
     import flash_attn
-    FLASH_ATTN_AVAILABLE = True
+    # Flash attention is only available on CUDA
+    FLASH_ATTN_AVAILABLE = torch.cuda.is_available()
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
     print("[UniRig] flash_attn not available for AR model, using standard PyTorch attention (slower but functional)")
@@ -42,7 +43,7 @@ class UniRigAR(ModelSpec):
             return [{} for _ in range(len(batch))]
         max_length = 0
         for b in batch:
-            max_length = max(max_length, b.tokens.shape[0])
+            max_length = max_length if max_length > b.tokens.shape[0] else b.tokens.shape[0]
         res = [{
             'input_ids': np.pad(b.tokens, ((0, max_length-b.tokens.shape[0])), 'constant', constant_values=b.pad),
             'attention_mask': np.pad(torch.ones(b.tokens.shape[0]), ((0, max_length - b.tokens.shape[0])), 'constant', constant_values=0.),
@@ -60,28 +61,45 @@ class UniRigAR(ModelSpec):
         _d = llm.copy()
         _d['vocab_size'] = self.tokenizer.vocab_size
 
-        # Remove flash_attention_2 requirement if flash_attn is not available
-        if not FLASH_ATTN_AVAILABLE and '_attn_implementation' in _d:
+        # Handle flash attention implementation
+        use_flash = kwargs.get('flash', True)
+        if (not use_flash or not FLASH_ATTN_AVAILABLE) and '_attn_implementation' in _d:
             original_impl = _d['_attn_implementation']
             _d.pop('_attn_implementation')
-            print(f"[UniRigAR] Removed '{original_impl}' from config, using default attention")
-        elif FLASH_ATTN_AVAILABLE:
+            reason = "disabled by config" if not use_flash else "not available"
+            print(f"[UniRigAR] Removed '{original_impl}' from config ({reason}), using default attention")
+        elif FLASH_ATTN_AVAILABLE and use_flash:
             print(f"[UniRigAR] Using flash_attention_2")
+            # Flash Attention requires 16-bit precision
+            if torch.cuda.is_bf16_supported():
+                _d['torch_dtype'] = torch.bfloat16
+            else:
+                _d['torch_dtype'] = torch.float16
 
         print(f"[UniRigAR] Loading transformer model from: {_d.get('pretrained_model_name_or_path', 'config')}")
         llm_config = AutoConfig.from_pretrained(**_d)
-        # Force float32 precision for the model
-        llm_config.torch_dtype = torch.float32
+        
+        # Set precision based on Flash Attention
+        if FLASH_ATTN_AVAILABLE and use_flash:
+            llm_config.torch_dtype = _d.get('torch_dtype', torch.float16)
+        else:
+            llm_config.torch_dtype = torch.float32
+            
         # Force enable pre_norm
         llm_config.pre_norm = True
         self.transformer = AutoModelForCausalLM.from_config(config=llm_config)
-        print(f"[UniRigAR] ✓ Transformer loaded")
+        
+        # Ensure model is in the correct dtype
+        if llm_config.torch_dtype != torch.float32:
+            self.transformer = self.transformer.to(llm_config.torch_dtype)
+            
+        print(f"[UniRigAR] [OK] Transformer loaded (dtype: {llm_config.torch_dtype})")
 
         self.hidden_size = llm.hidden_size
 
         print(f"[UniRigAR] Loading mesh encoder...")
         self.mesh_encoder = get_mesh_encoder(**mesh_encoder)
-        print(f"[UniRigAR] ✓ Mesh encoder loaded")
+        print(f"[UniRigAR] [OK] Mesh encoder loaded")
         
         if (
             isinstance(self.mesh_encoder, MAP_MESH_ENCODER.michelangelo) or

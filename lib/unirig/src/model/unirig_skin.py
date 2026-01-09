@@ -3,49 +3,31 @@ from torch import nn, FloatTensor, LongTensor, Tensor
 import torch.nn.functional as F
 import numpy as np
 from torch.nn.functional import pad
-from typing import Dict, List
+from typing import Dict, List, Union
 from transformers import AutoModelForCausalLM, AutoConfig
 import math
 import torch_scatter
 
-# Try to import flash_attn, fall back to standard PyTorch if not available
+# Check flash_attn availability
 try:
-    from flash_attn.modules.mha import MHA as FlashMHA
-    FLASH_ATTN_AVAILABLE = True
+    from flash_attn.modules.mha import MHA
+    FLASH_ATTN_AVAILABLE = torch.cuda.is_available()
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
-    print("[UniRig] flash_attn not available, using standard PyTorch attention (slower but functional)")
+    print("[UniRig] flash_attn not available for skinning model, using standard PyTorch attention (slower but functional)")
 
-# Wrapper to make standard PyTorch MultiheadAttention compatible with flash_attn MHA API
-class MHA(nn.Module):
-    """Multi-head attention wrapper that uses flash_attn if available, otherwise falls back to PyTorch."""
-    def __init__(self, embed_dim, num_heads, cross_attn=False, **kwargs):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.cross_attn = cross_attn
-
-        if FLASH_ATTN_AVAILABLE:
-            self.attn = FlashMHA(embed_dim=embed_dim, num_heads=num_heads, cross_attn=cross_attn, **kwargs)
-            self.use_flash = True
-        else:
-            # Use standard PyTorch MultiheadAttention
-            self.attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True, **kwargs)
-            self.use_flash = False
-
-    def forward(self, x, x_kv=None, key_padding_mask=None, **kwargs):
-        if self.use_flash:
-            # flash_attn API: forward(x, x_kv=None)
-            return self.attn(x, x_kv=x_kv, **kwargs)
-        else:
-            # PyTorch API: forward(query, key, value, key_padding_mask=None)
-            # If cross attention, x is query and x_kv is key/value
-            # If self attention, x is query/key/value
-            if self.cross_attn and x_kv is not None:
-                attn_output, _ = self.attn(x, x_kv, x_kv, key_padding_mask=key_padding_mask)
+if not FLASH_ATTN_AVAILABLE:
+    class MHA(nn.Module):
+        def __init__(self, embed_dim, num_heads, cross_attn=True):
+            super().__init__()
+            self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        def forward(self, q, x_kv=None):
+            # nn.MultiheadAttention expects (query, key, value)
+            # If x_kv is provided, it's cross attention
+            if x_kv is not None:
+                return self.mha(q, x_kv, x_kv)[0]
             else:
-                attn_output, _ = self.attn(x, x, x, key_padding_mask=key_padding_mask)
-            return attn_output
+                return self.mha(q, q, q)[0]
 
 from .spec import ModelSpec, ModelInput
 from .parse_encoder import MAP_MESH_ENCODER, get_mesh_encoder
@@ -159,7 +141,7 @@ class ResidualCrossAttn(nn.Module):
             nn.GELU(),
             nn.Linear(feat_dim * 4, feat_dim),
         )
-        
+
     def forward(self, q, kv):
         residual = q
         attn_output = self.attention(q, x_kv=kv)
@@ -181,7 +163,7 @@ class BoneEncoder(nn.Module):
         self.feat_dim = feat_dim
         self.num_heads = num_heads
         self.num_attn = num_attn
-        
+
         self.position_embed = FrequencyPositionalEmbedding(input_dim=self.feat_bone_dim)
 
         self.bone_encoder = nn.Sequential(
@@ -214,7 +196,7 @@ class BoneEncoder(nn.Module):
         x = self.bone_encoder((base_bone-min_coord[:, None, :]).reshape(-1, base_bone.shape[-1])).reshape(B, J, -1)
 
         latents = torch.cat([x, global_latents], dim=1)
-        
+
         for (i, attn) in enumerate(self.attn):
             x = attn(x, latents)
         return x
@@ -242,7 +224,7 @@ class SkinweightPred(nn.Module):
         return self.net(x)
 
 class UniRigSkin(ModelSpec):
-    
+
     def process_fn(self, batch: List[ModelInput]) -> List[Dict]:
         max_bones = 0
         for b in batch:
@@ -258,10 +240,10 @@ class UniRigSkin(ModelSpec):
                 skin = vertex_groups['skin']
             else:
                 skin = np.zeros_like(voxel_skin)
-            
+
             voxel_skin = np.pad(voxel_skin, ((0, 0), (0, max_bones-b.asset.J)), 'constant', constant_values=0.0)
             skin = np.pad(skin, ((0, 0), (0, max_bones-b.asset.J)), 'constant', constant_values=0.0)
-            
+
             # (J, 4, 4)
             res.append({
                 'voxel_skin': voxel_skin,
@@ -269,10 +251,10 @@ class UniRigSkin(ModelSpec):
                 'offset': current_offset,
             })
         return res
-    
+
     def __init__(self, mesh_encoder, global_encoder, **kwargs):
         super().__init__()
-        
+
         self.num_train_vertex       = kwargs['num_train_vertex']
         self.feat_dim               = kwargs['feat_dim']
         self.num_heads              = kwargs['num_heads']
@@ -287,7 +269,7 @@ class UniRigSkin(ModelSpec):
         self.global_encoder = get_mesh_encoder(**global_encoder)
         if isinstance(self.mesh_encoder, MAP_MESH_ENCODER.ptv3obj):
             self.feat_map = nn.Sequential(
-                nn.Linear(mesh_encoder['enc_channels'][-1], self.feat_dim),
+                nn.Linear(self.mesh_encoder.out_channels, self.feat_dim),
                 nn.LayerNorm(self.feat_dim),
                 nn.GELU(),
             )
@@ -309,7 +291,7 @@ class UniRigSkin(ModelSpec):
             num_heads=self.num_heads,
             num_attn=self.num_bone_attn,
         )
-        
+
         self.downscale = nn.Sequential(
             nn.Linear(2 * self.num_heads, self.num_heads),
             nn.LayerNorm(self.num_heads),
@@ -319,7 +301,7 @@ class UniRigSkin(ModelSpec):
             self.num_heads,
             self.mlp_dim,
         )
-        
+
         self.mesh_bone_attn = nn.ModuleList()
         self.mesh_bone_attn.extend([
             ResidualCrossAttn(self.feat_dim, self.num_heads) for _ in range(self.num_mesh_bone_attn)
@@ -349,7 +331,7 @@ class UniRigSkin(ModelSpec):
         '''
         Return predicted skin.
         '''
-        
+
         num_bones: Tensor = batch['num_bones']
         vertices: FloatTensor = batch['vertices'] # (B, N, 3)
         normals: FloatTensor = batch['normals']
@@ -357,7 +339,7 @@ class UniRigSkin(ModelSpec):
         tails: FloatTensor = batch['tails']
         voxel_skin: FloatTensor = batch['voxel_skin']
         parents: LongTensor = batch['parents']
-        
+
         # turn inputs' dtype into model's dtype
         dtype = next(self.parameters()).dtype
         vertices = vertices.type(dtype)
@@ -365,14 +347,14 @@ class UniRigSkin(ModelSpec):
         joints = joints.type(dtype)
         tails = tails.type(dtype)
         voxel_skin = voxel_skin.type(dtype)
-        
+
         B = vertices.shape[0]
         N = vertices.shape[1]
         J = joints.shape[1]
-        
+
         assert vertices.dim() == 3
         assert normals.dim() == 3
-        
+
         part_offset = torch.tensor([(i+1)*N for i in range(B)], dtype=torch.int64, device=vertices.device)
         idx_ptr = torch.nn.functional.pad(part_offset, (1, 0), value=0)
         min_coord = torch_scatter.segment_csr(vertices.reshape(-1, 3), idx_ptr, reduce="min")
@@ -384,7 +366,7 @@ class UniRigSkin(ModelSpec):
         else:
             for i in range((N + self.num_train_vertex - 1) // self.num_train_vertex):
                 pack.append(torch.arange(i*self.num_train_vertex, min((i+1)*self.num_train_vertex, N)))
-        
+
         # (B, seq_len, feat_dim)
         global_latents = self.encode_mesh_cond(vertices, normals)
         bone_feat = self.bone_encoder(
@@ -394,24 +376,33 @@ class UniRigSkin(ModelSpec):
             min_coord=min_coord,
             global_latents=global_latents,
         )
-        
+
+        if torch.isnan(bone_feat).any():
+            print("[UniRigSkin] WARNING: bone_feat contains NaNs!")
+        if torch.isnan(global_latents).any():
+            print("[UniRigSkin] WARNING: global_latents contains NaNs!")
+
         if isinstance(self.mesh_encoder, MAP_MESH_ENCODER.ptv3obj):
             feat = torch.cat([vertices, normals, torch.zeros_like(vertices)], dim=-1)
             ptv3_input = {
                 'coord': vertices.reshape(-1, 3),
                 'feat': feat.reshape(-1, 9),
-                'offset': torch.tensor(batch['offset']),
+                'offset': torch.tensor(batch['offset'], device=vertices.device, dtype=torch.int64),
                 'grid_size': self.grid_size,
             }
             if not self.training:
                 # must cast to float32 to avoid sparse-conv precision bugs
-                with torch.autocast(device_type='cuda', dtype=torch.float32):
+                device_type = 'cuda' if vertices.is_cuda else 'cpu'
+                with torch.autocast(device_type=device_type, dtype=torch.float32):
                     mesh_feat = self.mesh_encoder(ptv3_input).feat
                     mesh_feat = self.feat_map(mesh_feat).view(B, N, self.feat_dim)
             else:
                 mesh_feat = self.mesh_encoder(ptv3_input).feat
                 mesh_feat = self.feat_map(mesh_feat).view(B, N, self.feat_dim)
             mesh_feat = mesh_feat.type(dtype)
+            if torch.isnan(mesh_feat).any():
+                print("[UniRigSkin] WARNING: mesh_feat contains NaNs! Replacing with zeros.")
+                mesh_feat = torch.where(torch.isnan(mesh_feat), torch.zeros_like(mesh_feat), mesh_feat)
         else:
             raise NotImplementedError()
 
@@ -450,64 +441,82 @@ class UniRigSkin(ModelSpec):
             # (B, num_heads, N, J) -> (B, N, J, num_heads)
             attn_weight = attn_weight.reshape(B, self.num_heads, cur_N, J).permute(0, 2, 3, 1)
             attn_weight = self.attn_skin_norm(attn_weight)
-            
+
             embed_voxel_skin = self.voxel_skin_embed(voxel_skin[:, indices].reshape(B, cur_N, J, 1))
             embed_voxel_skin = self.voxel_skin_norm(embed_voxel_skin)
-            
+
             attn_weight = torch.cat([attn_weight, embed_voxel_skin], dim=-1)
             attn_weight = self.downscale(attn_weight)
-        
+
             # (B, N, J, num_heads * (1+c)) -> (B, N, J)
             skin_pred = torch.zeros(B, cur_N, J).to(attn_weight.device, dtype)
             for i in range(B):
                 # (N*J, C)
                 input_features = attn_weight[i, :, :num_bones[i], :].reshape(-1, attn_weight.shape[-1])
-                
+
                 if self.training:
-                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    device_type = 'cuda' if attn_weight.is_cuda else 'cpu'
+                    with torch.autocast(device_type=device_type, dtype=torch.float32):
                         pred = self.skinweight_pred(input_features).reshape(cur_N, num_bones[i])
-                        skin_pred[i, :, :num_bones[i]] = F.softmax(pred)
+                        skin_pred[i, :, :num_bones[i]] = F.softmax(pred, dim=-1)
                 else:
                     pred = self.skinweight_pred(input_features).reshape(cur_N, num_bones[i])
-                    skin_pred[i, :, :num_bones[i]] = F.softmax(pred)
+                    skin_pred[i, :, :num_bones[i]] = F.softmax(pred, dim=-1)
             skin_pred_list.append(skin_pred)
         skin_pred_list = torch.cat(skin_pred_list, dim=1)
         if not self.training:
             for i in range(B):
                 n = num_bones[i]
-                skin_pred_list[i, :, :n] = skin_pred_list[i, :, :n] * torch.pow(skin_mask[i, :, :n], self.voxel_mask)
-                skin_pred_list[i, :, :n] = skin_pred_list[i, :, :n] / skin_pred_list[i, :, :n].sum(dim=-1, keepdim=True)
-        return skin_pred_list, torch.cat(pack, dim=0)
-    
-    def training_step(self, batch: Dict) -> Dict[str, FloatTensor]:
+                # Ensure skin_mask is non-negative before power operation to avoid NaNs
+                safe_skin_mask = torch.clamp(skin_mask[i, :, :n], min=0.0)
+                skin_pred_list[i, :, :n] = skin_pred_list[i, :, :n] * torch.pow(safe_skin_mask, self.voxel_mask)
+                
+                sum_weights = skin_pred_list[i, :, :n].sum(dim=-1, keepdim=True)
+                if torch.isnan(sum_weights).any():
+                    print(f"[UniRigSkin] WARNING: sum_weights contains NaNs for batch {i}!")
+                
+                skin_pred_list[i, :, :n] = skin_pred_list[i, :, :n] / (sum_weights + 1e-8)
         
+        if torch.isnan(skin_pred_list).any():
+            print("[UniRigSkin] ERROR: skin_pred_list contains NaNs before return!")
+            # Fallback: replace NaNs with 0 and re-normalize
+            skin_pred_list = torch.where(torch.isnan(skin_pred_list), torch.zeros_like(skin_pred_list), skin_pred_list)
+            for i in range(B):
+                n = num_bones[i]
+                sum_weights = skin_pred_list[i, :, :n].sum(dim=-1, keepdim=True)
+                skin_pred_list[i, :, :n] = skin_pred_list[i, :, :n] / (sum_weights + 1e-8)
+
+        return skin_pred_list, torch.cat(pack, dim=0)
+
+    def training_step(self, batch: Dict) -> Dict[str, FloatTensor]:
+
         num_bones: Tensor = batch['num_bones']
         vertices: FloatTensor = batch['vertices'] # (B, N, 3)
         skin_gt: FloatTensor = batch['skin']
-        
+
         # turn inputs' dtype into model's dtype
         dtype = next(self.parameters()).dtype
         vertices = vertices.type(dtype)
         skin_gt = skin_gt.type(dtype)
-        
+
         B = vertices.shape[0]
         N = vertices.shape[1]
-        
+
         matrix_local = batch.get('matrix_local')
         if matrix_local is not None:
             matrix_local: FloatTensor
             matrix_local = matrix_local.type(dtype)
-            
+
         pose_matrix = batch.get('pose_matrix')
         if pose_matrix is not None:
             pose_matrix: FloatTensor
             pose_matrix = pose_matrix.type(dtype)
-        
+
         skin_pred, indices = self._get_predict(batch=batch)
         vertices = vertices[:, indices]
         skin_gt = skin_gt[:, indices]
         res = {}
-        
+
         if pose_matrix is not None:
             vertices_gt = linear_blend_skinning(
                 vertex=vertices,
@@ -528,7 +537,7 @@ class UniRigSkin(ModelSpec):
             res['vertices_gt'] = vertices_gt
             res['vertices_pred'] = vertices_pred
             res['vertex_loss'] = F.mse_loss(vertices_gt, vertices_pred)
-            
+
             eps = 1e-6
             normalization_loss = 0.
             for i in range(B):
@@ -541,7 +550,7 @@ class UniRigSkin(ModelSpec):
                     normalization_loss += _l / J
             normalization_loss /= B
             res['normalization_loss'] = normalization_loss
-        
+
         skin_l1_loss = 0.
         skin_l2_loss = 0.
         skin_smooth_l1_loss = 0.
@@ -555,16 +564,17 @@ class UniRigSkin(ModelSpec):
         mask_accu_005 = 0.
         mask_accu_010 = 0.
         mask_accu_050 = 0.
+        eps = 1e-6
         for i in range(B):
             J = num_bones[i].item()
             c_skin_pred = skin_pred[i, :, :J]
             c_skin_gt = skin_gt[i, :, :J]
-            
+
             skin_l1_loss += torch.nn.functional.l1_loss(c_skin_pred, c_skin_gt, reduction='mean')
             skin_l2_loss += torch.nn.functional.mse_loss(c_skin_pred, c_skin_gt, reduction='mean')
             skin_smooth_l1_loss += F.smooth_l1_loss(c_skin_pred, c_skin_gt, reduction='mean', beta=1.0)
             bce_loss += (-c_skin_gt * torch.log(c_skin_pred + eps) - (1 - c_skin_gt) * torch.log(1 - c_skin_pred + eps)).mean()
-            
+
             def get_iou(threshold):
                 cap = ((c_skin_gt > threshold) & (c_skin_pred > threshold)).float()
                 cup = ((c_skin_gt > threshold) | (c_skin_pred > threshold)).float()
@@ -572,7 +582,7 @@ class UniRigSkin(ModelSpec):
             iou_100 += get_iou(0.100)
             iou_010 += get_iou(0.010)
             iou_001 += get_iou(0.001)
-            
+
             mask_accu_001 += ((c_skin_gt - c_skin_pred).abs() < 0.001).float().mean()
             mask_accu_005 += ((c_skin_gt - c_skin_pred).abs() < 0.005).float().mean()
             mask_accu_010 += ((c_skin_gt - c_skin_pred).abs() < 0.010).float().mean()
@@ -596,37 +606,16 @@ class UniRigSkin(ModelSpec):
         mask_accu_005 /= B
         mask_accu_010 /= B
         mask_accu_050 /= B
-        
-        if self.current_epoch > 20 and mask_accu_005 < 0.01:
-            f = open(f"{torch.distributed.get_rank()}.txt", 'a')
-            if isinstance(mask_accu_005, Tensor):
-                f.write(f"{batch['path']} {mask_accu_005.item()}\n")
-            else:
-                f.write(f"{batch['path']} {mask_accu_005}\n")
-        
-        res['skin_l1_loss'] = skin_l1_loss
-        res['skin_l2_loss'] = skin_l2_loss
-        res['skin_smooth_l1_loss'] = skin_smooth_l1_loss
-        res['skin_zero_l1_loss'] = skin_zero_l1_loss
-        res['skin_non_zero_l1_loss'] = skin_non_zero_l1_loss
-        res['bce_loss'] = bce_loss
-        res['iou_100'] = iou_100
-        res['iou_010'] = iou_010
-        res['iou_001'] = iou_001
-        res['mask_accu_001'] = mask_accu_001
-        res['mask_accu_005'] = mask_accu_005
-        res['mask_accu_010'] = mask_accu_010
-        res['mask_accu_050'] = mask_accu_050
-        
+
         return res
-    
+
     def forward(self, data: Dict) -> Dict:
         return self.training_step(data=data)
-    
+
     def predict_step(self, batch: Dict):
         with torch.no_grad():
             num_bones: Tensor = batch['num_bones']
-            
+
             skin_pred, _ = self._get_predict(batch=batch)
             outputs = []
             for i in range(skin_pred.shape[0]):

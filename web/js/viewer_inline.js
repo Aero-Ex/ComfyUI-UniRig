@@ -37871,15 +37871,29 @@ version 0.6.9
 
                     // Center model
                     const box = new THREE.Box3().setFromObject(currentModel);
+                    
+                    // Robust NaN check
+                    if (isNaN(box.min.x) || isNaN(box.max.x) || isNaN(box.min.y) || isNaN(box.max.y) || isNaN(box.min.z) || isNaN(box.max.z)) {
+                        console.error('[UniRig FBX Viewer] ERROR: Mesh bounds contain NaN!', box);
+                        // Fallback to reasonable bounds to avoid propagating NaN
+                        box.min.set(-1, -1, -1);
+                        box.max.set(1, 1, 1);
+                    }
+                    
                     const center = box.getCenter(new THREE.Vector3());
-                    currentModel.position.sub(center);
+                    if (!isNaN(center.x) && !isNaN(center.y) && !isNaN(center.z)) {
+                        currentModel.position.sub(center);
+                        console.log('[UniRig FBX Viewer] Centered model at:', center);
+                    } else {
+                        console.warn('[UniRig FBX Viewer] Could not center model: center is NaN');
+                    }
 
                     // Store bounds for later use
                     meshBounds = box;
 
                     // Calculate size and maxDim early (needed in traverse)
                     const size = box.getSize(new THREE.Vector3());
-                    const maxDim = Math.max(size.x, size.y, size.z);
+                    const maxDim = Math.max(size.x, size.y, size.z) || 1.0;
 
                     // Find skeleton
                     let foundSkeleton = false;
@@ -37921,15 +37935,30 @@ version 0.6.9
                                 bones = child.skeleton.bones;
                                 console.log('[UniRig FBX Viewer] Found', bones.length, 'bones');
 
+                                // Check for NaN in bones
+                                bones.forEach((bone, i) => {
+                                    const wp = new THREE.Vector3();
+                                    bone.getWorldPosition(wp);
+                                    if (isNaN(wp.x) || isNaN(wp.y) || isNaN(wp.z)) {
+                                        console.error('[UniRig FBX Viewer] Bone ' + i + ' (' + (bone.name || 'unnamed') + ') has NaN world position!', wp);
+                                    }
+                                });
+
                                 // Debug: check skeleton bounds
                                 const skeletonBox = new THREE.Box3().setFromObject(skeletonHelper);
                                 const skeletonSize = skeletonBox.getSize(new THREE.Vector3());
                                 const skeletonCenter = skeletonBox.getCenter(new THREE.Vector3());
-                                console.log('[UniRig FBX Viewer] Skeleton bounds:', skeletonBox);
-                                console.log('[UniRig FBX Viewer] Skeleton size:', skeletonSize);
-                                console.log('[UniRig FBX Viewer] Skeleton center:', skeletonCenter);
-                                console.log('[UniRig FBX Viewer] Mesh size:', size);
-                                console.log('[UniRig FBX Viewer] Scale ratio (mesh/skeleton):', maxDim / Math.max(skeletonSize.x, skeletonSize.y, skeletonSize.z));
+                                console.log('[UniRig FBX Viewer] Skeleton bounds min:', skeletonBox.min.x.toFixed(4), skeletonBox.min.y.toFixed(4), skeletonBox.min.z.toFixed(4));
+                                console.log('[UniRig FBX Viewer] Skeleton bounds max:', skeletonBox.max.x.toFixed(4), skeletonBox.max.y.toFixed(4), skeletonBox.max.z.toFixed(4));
+                                console.log('[UniRig FBX Viewer] Skeleton size:', skeletonSize.x.toFixed(4), skeletonSize.y.toFixed(4), skeletonSize.z.toFixed(4));
+                                console.log('[UniRig FBX Viewer] Mesh size:', size.x.toFixed(4), size.y.toFixed(4), size.z.toFixed(4));
+                                
+                                const maxSkeletonDim = Math.max(skeletonSize.x, skeletonSize.y, skeletonSize.z);
+                                if (maxSkeletonDim > 0) {
+                                    console.log('[UniRig FBX Viewer] Scale ratio (mesh/skeleton):', (maxDim / maxSkeletonDim).toFixed(4));
+                                } else {
+                                    console.warn('[UniRig FBX Viewer] Skeleton has zero size, cannot calculate scale ratio');
+                                }
 
                                 // Save rest pose (only if not already saved)
                                 // This prevents overwriting the original rest pose when loading exported FBX files

@@ -22,7 +22,7 @@ writer:
 trainer:
   num_nodes: 1
   devices: 1
-  precision: bf16-mixed
+  precision: 32
   accelerator: gpu
   strategy: auto
   inference_mode: True

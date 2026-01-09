@@ -226,10 +226,18 @@ class ARSystem(L.LightningModule):
     
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
         try:
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**2
+                reserved = torch.cuda.memory_reserved() / 1024**2
+                print(f"[ARSystem] VRAM allocated: {allocated:.2f}MB, reserved: {reserved:.2f}MB")
+            
             prediction: List[DetokenizeOutput] = self._predict_step(batch=batch, batch_idx=batch_idx, dataloader_idx=dataloader_idx)
+            print(f"[ARSystem] predict_step returned {len(prediction)} predictions")
             return prediction
         except Exception as e:
-            print(str(e))
+            print(f"[ARSystem] predict_step EXCEPTION: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def configure_optimizers(self) -> Dict:
@@ -278,8 +286,9 @@ class ARWriter(BasePredictionWriter):
             self._epoch += 1
             trainer.predict_dataloader = trainer.datamodule.predict_dataloader()
             trainer.predict_loop.run()
-
+    
     def write_on_batch_end(self, trainer, pl_module: ARSystem, prediction: List[Dict], batch_indices, batch, batch_idx, dataloader_idx):
+        print(f"[ARWriter] write_on_batch_end called with {len(prediction)} predictions, user_mode={self.user_mode}, output_name={self.output_name}")
         assert 'path' in batch
         paths = batch['path']
         detokenize_output_list: List[DetokenizeOutput] = prediction
@@ -305,7 +314,12 @@ class ARWriter(BasePredictionWriter):
         if isinstance(num_faces, torch.Tensor):
             num_faces = num_faces.detach().cpu().numpy()
 
+        if len(detokenize_output_list) == 0:
+            print(f"[ARWriter] WARNING: No predictions to write! Skipping FBX export.")
+            return
+
         for (id, detokenize_output) in enumerate(detokenize_output_list):
+            print(f"[ARWriter] Processing prediction {id+1}/{len(detokenize_output_list)}")
             assert isinstance(detokenize_output, DetokenizeOutput), f"expect item of the list to be DetokenizeOutput, found: {type(detokenize_output)}"
             def make_path(save_name: str, suffix: str, trim: bool=False):
                 if trim:
@@ -350,9 +364,13 @@ class ARWriter(BasePredictionWriter):
                 raw_data.export_pc(path=make_path(self.export_pc, 'obj'))
             if self.export_fbx is not None:
                 if not self.user_mode:
+                    print(f"[ARWriter] Exporting FBX (non-user mode): {make_path(self.export_fbx, 'fbx')}")
                     raw_data.export_fbx(path=make_path(self.export_fbx, 'fbx'))
                 else:
                     if self.output_name is not None:
+                        print(f"[ARWriter] Exporting FBX (user mode): {self.output_name}")
                         raw_data.export_fbx(path=self.output_name)
+                        print(f"[ARWriter] FBX export completed: {self.output_name}")
                     else:
+                        print(f"[ARWriter] Exporting FBX (user mode, trimmed path): {make_path(self.export_fbx, 'fbx', trim=True)}")
                         raw_data.export_fbx(path=make_path(self.export_fbx, 'fbx', trim=True))

@@ -112,11 +112,18 @@ class UniRigApplySkinningMLNew:
                     "tooltip": "Number of vertex samples. Higher = more accurate vertex processing. Default: 8192"
                 }),
                 "voxel_mask_power": ("FLOAT", {
+                    "default": 3.0,
+                    "min": 0.1,
+                    "max": 5.0,
+                    "step": 0.1,
+                    "tooltip": "Model post-processing sharpness. Higher = sharper skin weight transitions. Default: 3.0 (training value)"
+                }),
+                "voxel_alpha": ("FLOAT", {
                     "default": 0.5,
                     "min": 0.1,
                     "max": 5.0,
                     "step": 0.1,
-                    "tooltip": "Power for voxel mask weight sharpness (alpha). Lower = smoother transitions. Default: 0.5 (model trained with this)"
+                    "tooltip": "Transform voxelization sharpness for heat diffusion. Higher = less diffusion. Default: 0.5"
                 }),
             }
         }
@@ -128,7 +135,7 @@ class UniRigApplySkinningMLNew:
 
     def apply_skinning(self, normalized_mesh, skeleton, skinning_model,
                        fbx_name=None, voxel_grid_size=None, num_samples=None, vertex_samples=None,
-                       voxel_mask_power=None):
+                       voxel_mask_power=None, voxel_alpha=None):
         print(f"[UniRigApplySkinningMLNew] Starting ML skinning (cached model only)...")
 
         # Validate model is provided
@@ -275,6 +282,8 @@ class UniRigApplySkinningMLNew:
             config_overrides['vertex_samples'] = vertex_samples
         if voxel_mask_power is not None:
             config_overrides['voxel_mask_power'] = voxel_mask_power
+        if voxel_alpha is not None:
+            config_overrides['voxel_alpha'] = voxel_alpha
 
         if config_overrides:
             print(f"[UniRigApplySkinningMLNew] Config overrides: {config_overrides}")
@@ -313,7 +322,7 @@ class UniRigApplySkinningMLNew:
                     )
 
                 inference_time = time.time() - step_start
-                print(f"[UniRigApplySkinningMLNew] ✓ Cached inference completed in {inference_time:.2f}s")
+                print(f"[UniRigApplySkinningMLNew] [OK] Cached inference completed in {inference_time:.2f}s")
 
             except Exception as e:
                 raise RuntimeError(
@@ -324,6 +333,19 @@ class UniRigApplySkinningMLNew:
         else:
             # FALLBACK TO SUBPROCESS (VRAM SAVING MODE)
             print(f"[UniRigApplySkinningMLNew] Running skinning inference with subprocess (VRAM saving mode)...")
+            
+            # IMPORTANT: Clear CUDA cache to free VRAM for subprocess
+            # This is needed because other ComfyUI models may still be loaded
+            import torch
+            if torch.cuda.is_available():
+                print(f"[UniRigApplySkinningMLNew] Clearing CUDA cache to free VRAM...")
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                # Force garbage collection to free any remaining references
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[UniRigApplySkinningMLNew] CUDA cache cleared")
             
             # Use lib/unirig/run.py directly
             unirig_run_py = os.path.join(UNIRIG_PATH, "run.py")
@@ -348,6 +370,7 @@ class UniRigApplySkinningMLNew:
             if config_overrides:
                 env['UNIRIG_CONFIG_OVERRIDES'] = json.dumps(config_overrides)
             
+            
             # Add cls if available
             cls_value = skeleton.get('cls')
             if cls_value:
@@ -360,6 +383,8 @@ class UniRigApplySkinningMLNew:
                     run_cmd,
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     env=env,
                     cwd=UNIRIG_PATH,
                     timeout=INFERENCE_TIMEOUT
@@ -375,7 +400,7 @@ class UniRigApplySkinningMLNew:
                     )
                     
                 inference_time = time.time() - step_start
-                print(f"[UniRigApplySkinningMLNew] ✓ Subprocess inference completed in {inference_time:.2f}s")
+                print(f"[UniRigApplySkinningMLNew] [OK] Subprocess inference completed in {inference_time:.2f}s")
             except subprocess.TimeoutExpired:
                 raise RuntimeError(f"UniRig inference timed out (>{INFERENCE_TIMEOUT}s)")
             except Exception as e:

@@ -583,6 +583,7 @@ class PointTransformerV3Object(PointModule):
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
+        self.out_channels = enc_channels[-1]
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders

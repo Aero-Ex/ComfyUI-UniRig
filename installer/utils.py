@@ -78,6 +78,8 @@ def run_pip_install(
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=timeout,
             env=env or os.environ.copy()
         )

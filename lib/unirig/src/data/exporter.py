@@ -316,7 +316,7 @@ class Exporter():
             # Run Blender
             print(f"[Exporter] Running Blender FBX export to: {path}")
             print(f"[Exporter] Blender command: {' '.join(cmd[:3])} ... {cmd[-2:]}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120)
 
             # Always print output for debugging
             if result.stdout:
@@ -337,7 +337,7 @@ class Exporter():
                 raise RuntimeError(f"FBX export completed but output file not found: {path}")
             else:
                 file_size = os.path.getsize(path)
-                print(f"[Exporter] ✓ FBX export successful: {path} ({file_size} bytes)")
+                print(f"[Exporter] [OK] FBX export successful: {path} ({file_size} bytes)")
 
         finally:
             # Clean up pickle file

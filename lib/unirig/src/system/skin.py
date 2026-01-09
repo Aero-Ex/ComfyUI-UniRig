@@ -464,7 +464,7 @@ def reskin(
             if p is None:
                 continue
             sum_skin[:, p] -= sum_skin[:, i]
-            skin = sum_skin / sum_skin.sum(axis=-1, keepdims=True)
+            skin = sum_skin / (sum_skin.sum(axis=-1, keepdims=True) + 1e-8)
 
     # avoid 0-skin
     mask = (skin>=threshold).any(axis=-1, keepdims=True)
